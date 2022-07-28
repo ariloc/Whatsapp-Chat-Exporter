@@ -78,7 +78,7 @@
 							    </div>
 							{% else %}
 								{% if msg.media == false %}
-								{{ msg.data | sanitize_except() }}
+								{{ msg.text_data | sanitize_except() }}
 								{% else %}
 									{% if "image/" in msg.mime %}
 									<a href="{{ msg.data }}"><img src="{{ msg.data }}" /></a>
@@ -97,9 +97,9 @@
 									{% else %}
 										{% filter escape %}{{ msg.data }}{% endfilter %}
 									{% endif %}
-									{% if msg.caption is not none %}
+									{% if msg.text_data is not none %}
 									<br>
-									{{ msg.caption }}
+									{{ msg.text_data }}
 									{% endif %}
 								{% endif %}
 								{% endif %}
@@ -134,7 +134,7 @@
 								</div>
 							{% else %}
 								{% if msg.media == false %}
-								{{ msg.data | sanitize_except() }}
+								{{ msg.text_data | sanitize_except() }}
 								{% else %}
 									{% if "image/" in msg.mime %}
 									<a href="{{ msg.data }}"><img src="{{ msg.data }}" /></a>
@@ -153,9 +153,9 @@
 									{% else %}
 										{% filter escape %}{{ msg.data }}{% endfilter %}
 									{% endif %}
-									{% if msg.caption is not none %}
+									{% if msg.text_data is not none %}
 									<br>
-									{{ msg.caption }}
+									{{ msg.text_data }}
 									{% endif %}
 								{% endif %}
 							{% endif %}

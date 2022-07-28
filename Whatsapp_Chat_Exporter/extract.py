@@ -175,7 +175,7 @@ def decrypt_backup(database, key, output, crypt=Crypt.CRYPT14):
             raise ValueError("The plaintext is not a SQLite database. Did you use the key to encrypt something...")
 
 
-def contacts(db, data):
+def contacts(db, contact_names):
     # Get contacts
     c = db.cursor()
     c.execute("""SELECT count() FROM wa_contacts""")
@@ -184,39 +184,229 @@ def contacts(db, data):
 
     c.execute("""SELECT jid, display_name FROM wa_contacts; """)
     row = c.fetchone()
+    # TODO: when display_name is None
     while row is not None:
-        data[row[0]] = {"name": row[1], "messages": {}}
+        contact_names[row[0]] = {"name": row[1]}
         row = c.fetchone()
 
 
-def messages(db, data):
+def messages(db, data, contact_names):
+    c = db.cursor()
+    c.execute("""SELECT jid._id,
+                        chat._id,
+                        jid.raw_string,
+                        chat.subject
+                 FROM chat LEFT JOIN jid
+                           ON chat.jid_row_id = jid._id""")
+
+    person = c.fetchone()
+    while person is not None:
+        if person[0] not in data:
+            data[person[0]] = {
+                "chat_id": person[1], 
+                "name": contact_names[person[2]["name"]] or person[3],
+                "messages": {}
+            }
+        
+        person = c.fetchone()
+
+    for jid_idx, val in data.items():
+        msgs = db.cursor()
+
+        chat_id = val["chat_id"]
+        
+        # Get basic info about messages
+        msgs.execute(f"SELECT _id,
+                              key_id,
+                              from_me,
+                              timestamp,
+                              text_data,
+                              message_type,
+                              sender_jid_row_id
+                       FROM message
+                       WHERE chat_row_id = {chat_id}")
+        
+        msg = msgs.fetchone()
+        while msg is not None:
+            val["messages"][msg[0]] = {
+                "key_id": msg[1],
+                "from_me": bool(msg[2]),
+                "timestamp": msg[3]/1000,
+                "time": datetime.fromtimestamp(msg[3]/1000).strftime("%H:%M"),
+                "text_data": None,      # filled later
+                "message_type": msg[5],
+                "sender": None          # filled later
+            }
+
+            # If the message isn't from me append sender name, otherwise it will stay None
+            if not bool(msg[1]):
+                val["messages"][msg[0]]["sender"] = 
+                    val["name"] if msg[6] == 0 else data[msg[6]]["name"]
+
+            text_data = msg[4]
+            if text_data is not None:
+                if "\r\n" in text_data:
+                    text_data = text_data.replace("\r\n", "<br>")
+                if "\n" in text_data:
+                    text_data = text_data.replace("\n", "<br>")
+            val["messages"][msg[0]] = text_data
+            
+            # Deal with deleted messages
+            if msg[5] == 15:
+                val["messages"][msg[0]]["data"] = "Message deleted"
+                val["messages"][msg[0]]["meta"] = True
+
+            msg = msgs.fetchone()
+
+        # Relate to quoted messages
+        quoted_msgs = db.cursor()
+        quoted_msgs.execute(f"SELECT message_row_id,
+                                     key_id,
+                                     text_data
+                              FROM message_quoted
+                              WHERE chat_row_id = {chat_id}")
+
+        quote = quoted_msgs.fetchone()
+        while quote is not None:
+            val["messages"][quote[0]]["reply"] = quote[1]
+            val["messages"][quote[0]]["quoted_data"] = quote[2]
+
+            quote = quoted_msgs.fetchone()
+
+        toDelete = []
+        group_changes = db.cursor()
+        # msg_id, action_type, jid_idx for the one who made the change,
+        # text_data (new data), old_grp_name, user_added (jid), old_jid for user,
+        # new_jid for user
+        group_changes.execute(f"SELECT message._id,
+                                       message_system.action_type,
+                                       message.sender_jid_row_id,
+                                       message.text_data,
+                                       message_system_value_change.old_data,
+                                       message_system_chat_participant.user_jid_row_id,
+                                       message_system_number_change.old_jid_row_id,
+                                       message_system_number_change.new_jid_row_id
+                                FROM message 
+                                INNER JOIN message_system
+                                    ON message._id = message_system.message_row_id
+                                LEFT JOIN message_system_value_change
+                                    ON message._id = message_system_value_change.message_row_id
+                                LEFT JOIN message_system_chat_participant
+                                    ON message._id = message_system_chat_participant.message_row_id
+                                LEFT JOIN message_system_number_change
+                                    ON message._id = message_system_number_change.message_row_id
+                                WHERE message.chat_row_id = {chat_id}
+                                AND message.message_type = 7")
+
+        # Assuming now the jid is from a group... (otherwise query would be empty)
+        change = group_changes.fetchone()
+        while change is not None:
+            msg_data = ""
+
+            # Group changes are represented as messages, which should always have a sender (changer)
+            changer = data[change[2]]["name"]
+
+            # Supposedly, == 1 is for a normal change, and ==   11 is for the first change (when added to the group, I think)
+            if change[1] == 1 or change[1] == 11:
+                old_name = change[4]
+                new_name = change[3]
+
+                if old_name is not None:
+                    msg_data = f"{changer} changed the name of the group from {old_name} to {new_name}"
+                else
+                    msg_data = f"{changer} changed the name of the group to {new_name}"
+            
+            # TODO: icon changed
+            if change[1] == 6:
+
+            if change[1] == 10:
+                # TODO: Parse numbers
+                old_number = 
+                new_number = 
+                msg_data = f"{changer} changed their phone_number from {old_number} to {new_number}"
+
+            if change[1] == 12:
+                new_participant = change[5]
+                # TODO: Detect when user is you, then change by name
+                msg_data = f"{changer} added {new_participant} to the group"
+
+            val["messages"][change[0]]["data"] = msg_data;
+            val["messages"][change[0]]["meta"] = True;
+
+            if mesg["text_data"] is not None:
+                try:
+                    int(mesg["text_data"])
+                except ValueError:
+                    # TODO: Mention old group name (message_system_value_change table)
+                    mesg["data"] = f"The group name changed to {content[4]}"
+                    mesg["meta"] = True
+                else:
+                    toDelete.append(_id) # INVALID!
+            else:
+                
+                thumb_image = content[7]
+                if thumb_image is not None:
+                    if b"\x00\x00\x01\x74\x00\x1A" in thumb_image:
+                        # Add user
+                        added = phone_number_re.search(
+                            thumb_image.decode("unicode_escape"))[0]
+                        if added in data:
+                            name_right = data[added]["name"]
+                        else:
+                            name_right = added.split('@')[0]
+                        if content[8] is not None:
+                            if content[8] in data:
+                                name_left = data[content[8]]["name"]
+                            else:
+                                name_left = content[8].split('@')[0]
+                            msg = f"{name_left} added {name_right or 'You'}"
+                        else:
+                            msg = f"Added {name_right or 'You'}"
+                    elif b"\xac\xed\x00\x05\x74\x00" in thumb_image:
+                        # Changed number
+                        original = content[8].split('@')[0]
+                        changed = thumb_image[7:].decode().split('@')[0]
+                        msg = f"{original} changed to {changed}"
+                    data[content[0]]["messages"][content[1]]["data"] = msg
+                    data[content[0]]["messages"][content[1]]["meta"] = True
+                else:
+                    if content[4] is None:
+                        del data[content[0]]["messages"][content[1]]
+    else:
+        # Private chat -> INVALID!
+        toDelete.append(_id)
+    
+        # Delete entries marked as invalid (actually, probably unsupported)
+        for elem in toDelete
+            del val["messages"][elem]
+
+
     # Get message history
     c = db.cursor()
-    c.execute("""SELECT count() FROM messages""")
+    c.execute("""SELECT count() FROM message""")
     total_row_number = c.fetchone()[0]
     print(f"Gathering messages...(0/{total_row_number})", end="\r")
 
+    # TODO: Consider g.us domain
     phone_number_re = re.compile(r"[0-9]+@s.whatsapp.net")
-    c.execute("""SELECT messages.key_remote_jid,
-                        messages._id,
-                        messages.key_from_me,
-                        messages.timestamp,
-                        messages.data,
-                        messages.status,
-                        messages.edit_version,
-                        messages.thumb_image,
-                        messages.remote_resource,
-                        messages.media_wa_type,
-                        messages.latitude,
-                        messages.longitude,
-                        messages_quotes.key_id as quoted,
-                        messages.key_id,
-                        messages_quotes.data,
-                        messages.media_caption
-                 FROM messages
-                    LEFT JOIN messages_quotes
-                        ON messages.quoted_row_id = messages_quotes._id
-                 WHERE messages.key_remote_jid <> '-1';""")
+    c.execute("""SELECT jid.raw_string,
+                        message._id,
+                        message.from_me,
+                        message.timestamp,
+                        message.text_data,
+                        message.status,
+                        message.message_type,
+                        message.thumb_image,
+                        message.remote_resource,
+                        message.media_wa_type,
+                        message.latitude,
+                        message.longitude,
+                        message_quoted.key_id as quoted,
+                        message.key_id,
+                        message_quoted.text_data,
+                        message.media_caption
+                 FROM ((message LEFT JOIN message_quoted ON message._id = message_quoted.message_row_id) LEFT JOIN chat ON message.chat_row_id = chat._id) LEFT JOIN jid ON chat.jid_row_id = jid._id)
+                 WHERE message.chat_row_id <> '-1';""")
     i = 0
     content = c.fetchone()
     while content is not None:
@@ -231,10 +421,13 @@ def messages(db, data):
             "meta": False,
             "data": None
         }
+        # If it's a group and another one than me sent it
         if "-" in content[0] and content[2] == 0:
             name = None
+            # Get the person's name
             if content[8] in data:
                 name = data[content[8]]["name"]
+                # Alternate name from raw_string if it fails
                 if "@" in content[8]:
                     fallback = content[8].split('@')[0]
                 else:
@@ -257,83 +450,20 @@ def messages(db, data):
         else:
             data[content[0]]["messages"][content[1]]["caption"] = None
 
-        if content[5] == 6:
-            if "-" in content[0]:
-                # Is Group
-                if content[4] is not None:
-                    try:
-                        int(content[4])
-                    except ValueError:
-                        msg = f"The group name changed to {content[4]}"
-                        data[content[0]]["messages"][content[1]]["data"] = msg
-                        data[content[0]]["messages"][content[1]]["meta"] = True
-                    else:
-                        del data[content[0]]["messages"][content[1]]
-                else:
-                    thumb_image = content[7]
-                    if thumb_image is not None:
-                        if b"\x00\x00\x01\x74\x00\x1A" in thumb_image:
-                            # Add user
-                            added = phone_number_re.search(
-                                thumb_image.decode("unicode_escape"))[0]
-                            if added in data:
-                                name_right = data[added]["name"]
-                            else:
-                                name_right = added.split('@')[0]
-                            if content[8] is not None:
-                                if content[8] in data:
-                                    name_left = data[content[8]]["name"]
-                                else:
-                                    name_left = content[8].split('@')[0]
-                                msg = f"{name_left} added {name_right or 'You'}"
-                            else:
-                                msg = f"Added {name_right or 'You'}"
-                        elif b"\xac\xed\x00\x05\x74\x00" in thumb_image:
-                            # Changed number
-                            original = content[8].split('@')[0]
-                            changed = thumb_image[7:].decode().split('@')[0]
-                            msg = f"{original} changed to {changed}"
-                        data[content[0]]["messages"][content[1]]["data"] = msg
-                        data[content[0]]["messages"][content[1]]["meta"] = True
-                    else:
-                        if content[4] is None:
-                            del data[content[0]]["messages"][content[1]]
-            else:
-                # Private chat
-                if content[4] is None and content[7] is None:
-                    del data[content[0]]["messages"][content[1]]
 
+        elif content[6] == 15:
+            msg = "Message deleted"
+            data[content[0]]["messages"][content[1]]["meta"] = True
+        #elif content[6] == "5": #TODO: status for location
+        #    msg = f"Location shared: {content[10], content[11]}"
+        #    data[content[0]]["messages"][content[1]]["meta"] = True
         else:
-            if content[2] == 1:
-                if content[5] == 5 and content[6] == 7:
-                    msg = "Message deleted"
-                    data[content[0]]["messages"][content[1]]["meta"] = True
-                else:
-                    if content[9] == "5":
-                        msg = f"Location shared: {content[10], content[11]}"
-                        data[content[0]]["messages"][content[1]]["meta"] = True
-                    else:
-                        msg = content[4]
-                        if msg is not None:
-                            if "\r\n" in msg:
-                                msg = msg.replace("\r\n", "<br>")
-                            if "\n" in msg:
-                                msg = msg.replace("\n", "<br>")
-            else:
-                if content[5] == 0 and content[6] == 7:
-                    msg = "Message deleted"
-                    data[content[0]]["messages"][content[1]]["meta"] = True
-                else:
-                    if content[9] == "5":
-                        msg = f"Location shared: {content[10], content[11]}"
-                        data[content[0]]["messages"][content[1]]["meta"] = True
-                    else:
-                        msg = content[4]
-                        if msg is not None:
-                            if "\r\n" in msg:
-                                msg = msg.replace("\r\n", "<br>")
-                            if "\n" in msg:
-                                msg = msg.replace("\n", "<br>")
+            msg = content[4]
+            if msg is not None:
+                if "\r\n" in msg:
+                    msg = msg.replace("\r\n", "<br>")
+                if "\n" in msg:
+                    msg = msg.replace("\n", "<br>")
 
             data[content[0]]["messages"][content[1]]["data"] = msg
 
@@ -516,13 +646,14 @@ if __name__ == "__main__":
         output_folder = args[1]
 
     data = {}
+    contact_names = {}
 
     if os.path.isfile(contact_db):
         with sqlite3.connect(contact_db) as db:
-            contacts(db, data)
+            contacts(db, contact_names)
     if os.path.isfile(msg_db):
         with sqlite3.connect(msg_db) as db:
-            messages(db, data)
+            messages(db, data, contact_names)
             media(db, data, media_folder)
             vcard(db, data)
         create_html(data, output_folder)
